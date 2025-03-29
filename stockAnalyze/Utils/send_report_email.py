@@ -10,11 +10,27 @@ import traceback
 import markdown2
 import re
 import argparse
-from param_utils import validate_and_normalize_date
+from pathlib import Path
+
+# 添加父目录到Python路径
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.append(str(parent_dir))
+
+from Utils.param_utils import validate_and_normalize_date
+
+# 获取脚本所在目录的绝对路径
+script_dir = Path(__file__).parent.parent
+email_list_path = script_dir / 'Settings' / 'stock_analysis_email_list.txt'
 
 def read_email_list(filename):
     """读取邮件列表，第一行为收件人，第二行为密送人"""
-    with open(filename, 'r') as f:
+    # 获取脚本所在目录的绝对路径
+    script_dir = Path(__file__).parent.parent
+    email_list_path = script_dir / 'Settings' / filename
+    
+    with open(email_list_path, 'r') as f:
         lines = [line.strip() for line in f if line.strip()]
         to_list = lines[0].split(',') if lines else []
         bcc_list = lines[1].split(',') if len(lines) > 1 else []
@@ -23,10 +39,11 @@ def read_email_list(filename):
 def read_report(date=None):
     """读取指定日期的报告内容"""
     analysis_date = date if date else datetime.now().strftime('%Y-%m-%d')
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    report_path = os.path.join(script_dir, 'market_analysis', f'market_analysis_{analysis_date}.md')
+    # 获取脚本所在目录的绝对路径
+    script_dir = Path(__file__).parent.parent
+    report_path = script_dir / 'market_analysis' / f'market_analysis_{analysis_date}.md'
     
-    if not os.path.exists(report_path):
+    if not report_path.exists():
         raise FileNotFoundError(f"找不到报告文件: {report_path}")
     
     with open(report_path, 'r', encoding='utf-8') as f:
@@ -101,13 +118,13 @@ body {
 }
 
 .price-up {
-    color: #d63031;
-    background-color: rgba(255, 118, 117, 0.1);
+    color: #00b894;  /* 绿色 */
+    background-color: rgba(0, 184, 148, 0.1);
 }
 
 .price-down {
-    color: #00b894;
-    background-color: rgba(0, 184, 148, 0.1);
+    color: #d63031;  /* 红色 */
+    background-color: rgba(255, 118, 117, 0.1);
 }
 
 .price-unchanged {
@@ -321,80 +338,88 @@ def generate_html_report(title, content):
 
 def format_markdown_for_email(markdown_content):
     """将Markdown格式转换为HTML格式"""
-    css = get_html_style()
-    # 预处理表格
-    lines = markdown_content.split('\n')
-    processed_lines = []
-    table_lines = []
-    in_table = False
-    
-    for line in lines:
-        line = line.strip()
-        if not line:  # 跳过空行
-            continue
+    try:
+        if not markdown_content:
+            return '<p class="error-message">报告内容为空</p>'
             
-        # 检测表格开始和结束
-        if line.startswith('|'):
-            if not in_table:
-                in_table = True
-                table_lines = []  # 清空表格行列表
-            table_lines.append(line)
-        elif line.startswith(('+', '=')):  # 忽略表格分隔行
-            continue
-        elif in_table:
-            # 如果不是表格行且之前在表格中，说明表格结束
-            if table_lines:
-                # 处理表格
-                table_html = process_table(table_lines)
-                processed_lines.append(table_html)
-                table_lines = []
-            in_table = False
-            if line:  # 如果当前行不为空，添加到处理后的行中
-                processed_lines.append(line)
-        else:
-            # 处理市场整体分析和市场综合判断部分
-            if line.startswith('市场整体分析:'):
-                processed_lines.append('<div class="market-analysis-title">')
-                processed_lines.append(line)
-                processed_lines.append('</div>')
-            elif line.startswith('市场综合判断:'):
-                processed_lines.append('<div class="market-summary-title">')
-                processed_lines.append(line)
-                processed_lines.append('</div>')
-            elif line.startswith(('1.', '2.', '3.', '4.', '5.', '6.')):
-                processed_lines.append('<div class="market-analysis-item">')
-                processed_lines.append(line)
-                processed_lines.append('</div>')
+        css = get_html_style()
+        # 预处理表格
+        lines = markdown_content.split('\n')
+        processed_lines = []
+        table_lines = []
+        in_table = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:  # 跳过空行
+                continue
+                
+            # 检测表格开始和结束
+            if line.startswith('|'):
+                if not in_table:
+                    in_table = True
+                    table_lines = []  # 清空表格行列表
+                table_lines.append(line)
+            elif line.startswith(('+', '=')):  # 忽略表格分隔行
+                continue
+            elif in_table:
+                # 如果不是表格行且之前在表格中，说明表格结束
+                if table_lines:
+                    # 处理表格
+                    table_html = process_table(table_lines)
+                    processed_lines.append(table_html)
+                    table_lines = []
+                in_table = False
+                if line:  # 如果当前行不为空，添加到处理后的行中
+                    processed_lines.append(line)
             else:
-                processed_lines.append(line)
-    
-    # 处理最后一个表格（如果有）
-    if table_lines:
-        table_html = process_table(table_lines)
-        processed_lines.append(table_html)
-    
-    # 将处理后的内容重新组合
-    processed_content = '\n'.join(processed_lines)
-    
-    # 使用markdown2转换为HTML
-    html_content = markdown2.markdown(processed_content, extras=['tables', 'fenced-code-blocks'])
-    
-    # 添加HTML样式
-    html = f"""
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        {css}
-    </head>
-    <body>
-        <div class="content">
-            {html_content}
-        </div>
-    </body>
-    </html>
-    """
-    
-    return html
+                # 处理市场整体分析和市场综合判断部分
+                if line.startswith('市场整体分析:'):
+                    processed_lines.append('<div class="market-analysis-title">')
+                    processed_lines.append(line)
+                    processed_lines.append('</div>')
+                elif line.startswith('市场综合判断:'):
+                    processed_lines.append('<div class="market-summary-title">')
+                    processed_lines.append(line)
+                    processed_lines.append('</div>')
+                elif line.startswith(('1.', '2.', '3.', '4.', '5.', '6.')):
+                    processed_lines.append('<div class="market-analysis-item">')
+                    processed_lines.append(line)
+                    processed_lines.append('</div>')
+                else:
+                    processed_lines.append(line)
+        
+        # 处理最后一个表格（如果有）
+        if table_lines:
+            table_html = process_table(table_lines)
+            processed_lines.append(table_html)
+        
+        # 将处理后的内容重新组合
+        processed_content = '\n'.join(processed_lines)
+        
+        # 使用markdown2转换为HTML
+        html_content = markdown2.markdown(processed_content, extras=['tables', 'fenced-code-blocks'])
+        
+        # 添加HTML样式
+        html = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            {css}
+        </head>
+        <body>
+            <div class="content">
+                {html_content}
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
+        
+    except Exception as e:
+        error_msg = f'处理Markdown内容时发生错误: {str(e)}\n{traceback.format_exc()}'
+        return f'<p class="error-message">{error_msg}</p>'
 
 def detect_table_structure(table_data):
     """检测表格结构，返回列数和每列的类型"""
@@ -686,7 +711,11 @@ def process_stock_group(group_name, stocks_data):
         # 处理市场分析
         if "market_analysis" in stocks_data:
             try:
-                content.append(process_market_analysis(stocks_data["market_analysis"]))
+                market_analysis = stocks_data["market_analysis"]
+                if isinstance(market_analysis, dict):
+                    content.append(process_market_analysis(market_analysis))
+                else:
+                    content.append('<p class="error-message">市场分析数据格式错误</p>')
             except Exception as e:
                 content.append(f'<p class="error-message">处理市场分析数据时发生错误: {str(e)}</p>')
         else:
@@ -695,6 +724,30 @@ def process_stock_group(group_name, stocks_data):
         return '\n'.join(content)
     except Exception as e:
         return f'<h2>{group_name}</h2>\n<p class="error-message">分析时发生错误: {str(e)}</p>'
+
+def process_market_analysis(market_analysis):
+    """处理市场分析数据"""
+    try:
+        if not market_analysis:
+            return '<p class="error-message">无市场分析数据</p>'
+            
+        content = []
+        
+        # 处理市场整体分析
+        if "market_overall" in market_analysis:
+            content.append('<div class="market-analysis-title">市场整体分析:</div>')
+            for item in market_analysis["market_overall"]:
+                content.append(f'<div class="market-analysis-item">{item}</div>')
+                
+        # 处理市场综合判断
+        if "market_summary" in market_analysis:
+            content.append('<div class="market-summary-title">市场综合判断:</div>')
+            content.append(f'<div class="market-analysis-item">{market_analysis["market_summary"]}</div>')
+            
+        return '\n'.join(content)
+        
+    except Exception as e:
+        return f'<p class="error-message">处理市场分析数据时发生错误: {str(e)}</p>'
 
 def send_email(to_list, bcc_list, report_content, date=None, test=False):
     """发送邮件"""
@@ -756,9 +809,7 @@ def main():
         analysis_date = validate_and_normalize_date(args.args)
         
         # 读取邮件列表
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        email_list_path = os.path.join(script_dir, 'stock_analysis_email_list.txt')
-        to_list, bcc_list = read_email_list(email_list_path)
+        to_list, bcc_list = read_email_list('stock_analysis_email_list.txt')
         
         # 读取报告内容
         report_content = read_report(analysis_date)

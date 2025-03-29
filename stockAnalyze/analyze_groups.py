@@ -9,14 +9,23 @@ import argparse
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from param_utils import get_last_trading_day, validate_and_normalize_date
+from Utils.param_utils import get_last_trading_day, validate_and_normalize_date
 
 def read_stock_groups(filename):
     """读取股票分组列表"""
-    with open(filename, 'r') as f:
-        return [line.strip().split(',') for line in f if line.strip()]
+    groups = []
+    with open(filename, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            # 按逗号分割股票代码
+            stocks = [s.strip() for s in line.split(',') if s.strip()]
+            if stocks:
+                groups.append(stocks)
+    return groups
 
-def generate_report(groups, date=None, clear_cache=False, report_only=False):
+def generate_report(groups, date=None, clear_cache=False):
     """为每个股票组生成分析报告"""
     analysis_date = date if date else datetime.now().strftime('%Y-%m-%d')
     
@@ -29,8 +38,10 @@ def generate_report(groups, date=None, clear_cache=False, report_only=False):
     
     # 如果不清除缓存且报告已存在，直接返回
     if not clear_cache and os.path.exists(output_filename):
-        if not report_only:
-            print(f"使用缓存的报告: {output_filename}")
+        print(f"使用缓存的报告: {output_filename}")
+        # 打印报告内容
+        with open(output_filename, 'r', encoding='utf-8') as f:
+            print(f.read())
         return
     
     # 创建报告
@@ -54,64 +65,68 @@ def generate_report(groups, date=None, clear_cache=False, report_only=False):
         
         report.append(f"\n## {group_name}\n")
         
-        # 捕获analyze_stocks的输出
-        output = StringIO()
-        with contextlib.redirect_stdout(output):
-            analyze_stocks(stocks, date, clear_cache, report_only=report_only)
+        # 运行分析并获取报告内容
+        group_report = analyze_stocks(stocks, date, clear_cache)
+        if group_report:
+            report.extend(group_report.split('\n'))
         
-        # 添加表格部分到报告
-        report.extend(output.getvalue().split('\n'))
-        report.append("\n---\n")  # 添加分隔线
+        # 添加分隔线
+        report.append("\n---\n")
     
     # 如果有自选股，添加自选股整体分析
     if custom_stocks:
         report.append("\n# 自选股整体分析\n")
         
-        # 捕获自选股分析输出
-        output = StringIO()
-        with contextlib.redirect_stdout(output):
-            analyze_stocks(custom_stocks, date, clear_cache, report_only=report_only)
-        
-        # 从输出中提取市场整体分析部分
-        output_lines = output.getvalue().split('\n')
-        market_analysis_start = False
-        for line in output_lines:
-            if line.startswith('市场整体分析:'):
-                market_analysis_start = True
-                report.append(line)
-            elif market_analysis_start:
-                report.append(line)
+        # 运行自选股分析并获取报告内容
+        custom_report = analyze_stocks(custom_stocks, date, clear_cache)
+        if custom_report:
+            # 只保留市场整体分析部分
+            report_lines = custom_report.split('\n')
+            market_analysis_start = False
+            for line in report_lines:
+                if line.startswith('市场整体分析:'):
+                    market_analysis_start = True
+                    report.append(line)
+                elif market_analysis_start:
+                    report.append(line)
+                    if line.startswith('市场综合判断:'):
+                        break
     
     # 写入文件
+    report_content = '\n'.join(report)
     with open(output_filename, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(report))
+        f.write(report_content)
     
-    if not report_only:
-        print(f"报告已生成: {output_filename}")
+    print(f"报告已生成: {output_filename}")
+    # 打印报告内容
+    print(report_content)
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='股票组分析工具')
     parser.add_argument('args', nargs='*', help='日期参数（可选，支持YYYY-MM-DD、YYYY.MM.DD、YYYY/MM/DD、YYYYMMDD格式）')
     parser.add_argument('--clear', action='store_true', help='清除缓存数据')
-    parser.add_argument('--report-only', action='store_true', help='只生成报告，不打印分析过程')
     
     args = parser.parse_args()
     
     # 读取股票列表
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    stock_list_path = os.path.join(script_dir, 'stock_list.txt')
+    stock_list_path = os.path.join(script_dir, 'Settings', 'stock_list.txt')
     
     try:
         # 验证并标准化日期参数
         normalized_date = validate_and_normalize_date(args.args) if args.args else None
         analysis_date = get_last_trading_day(normalized_date) if normalized_date else None
-        if normalized_date and analysis_date != normalized_date:
+        
+        if not analysis_date:
+            analysis_date = get_last_trading_day()
+            print(f"未指定日期，使用最近的交易日: {analysis_date}", file=sys.stderr)
+        elif normalized_date and analysis_date != normalized_date:
             print(f"警告：目标日期 {normalized_date} 不是交易日，将使用最近的交易日 {analysis_date}", file=sys.stderr)
 
         # 分析股票组
         groups = read_stock_groups(stock_list_path)
-        generate_report(groups, analysis_date, args.clear, args.report_only)
+        generate_report(groups, analysis_date, args.clear)
                 
     except Exception as e:
         print(f"程序执行出错: {str(e)}", file=sys.stderr)

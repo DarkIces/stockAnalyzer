@@ -3,6 +3,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import sys
 import pandas as pd
+from pathlib import Path
 
 def normalize_stock_code(stock_code: str) -> str:
     """

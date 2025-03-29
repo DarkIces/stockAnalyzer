@@ -1,15 +1,32 @@
 # -*- coding: utf-8 -*-
 import sys
 import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-import yfinance as yf
+from Utils.param_utils import validate_and_normalize_params, get_last_trading_day
+from Utils.stock_data_manager import StockDataManager
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import argparse
-from param_utils import validate_and_normalize_params, get_last_trading_day
+
+# 确保stdout和stderr使用UTF-8编码
+if not isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+if not isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+def debug_print(*args, **kwargs):
+    """打印调试信息"""
+    kwargs['flush'] = True
+    if 'file' not in kwargs:
+        kwargs['file'] = sys.stderr
+    print(*args, **kwargs)
+
+def info_print(*args, **kwargs):
+    """打印信息"""
+    kwargs['flush'] = True
+    if 'file' not in kwargs:
+        kwargs['file'] = sys.stdout
+    print(*args, **kwargs)
 
 def calculate_psar(high, low, close, af_start=0.02, af_step=0.02, af_max=0.2):
     """计算PSAR（抛物线指标）"""
@@ -69,8 +86,15 @@ def calculate_psar(high, low, close, af_start=0.02, af_step=0.02, af_max=0.2):
     
     return psar, psarbull, psarbear
 
-def check_psar(stock_code, date=None, days=30):
-    """检查股票的PSAR指标"""
+def check_psar(stock_code, date=None, days=30, manager=None):
+    """检查股票的PSAR指标
+    
+    Args:
+        stock_code (str): 股票代码
+        date (str, optional): 分析日期. Defaults to None.
+        days (int, optional): 分析天数. Defaults to 30.
+        manager (StockDataManager, optional): 数据管理器实例. Defaults to None.
+    """
     try:
         # 使用传入的日期
         analysis_date = date
@@ -78,15 +102,26 @@ def check_psar(stock_code, date=None, days=30):
             print("无法获取最近交易日数据。", file=sys.stderr)
             return
         
-        # 获取股票数据
-        stock = yf.Ticker(stock_code)
+        # 计算开始日期（获取更多数据以计算指标）
         end_date = pd.Timestamp(analysis_date)
-        start_date = end_date - pd.Timedelta(days=days*2)  # 获取更多数据以计算指标
-        df = stock.history(start=start_date, end=end_date + pd.Timedelta(days=1))
+        start_date = (end_date - pd.Timedelta(days=days*2)).strftime('%Y-%m-%d')
         
-        if df.empty:
+        # 获取股票数据
+        if manager is None:
+            manager = StockDataManager()
+        df, from_yf = manager.get_stock_data(stock_code, start_date=start_date, end_date=analysis_date)
+        
+        if df is None or df.empty:
             print(f"无法获取 {stock_code} 的数据。", file=sys.stderr)
             return
+        
+        # 确保数据足够计算指标
+        if len(df) < 3:  # PSAR至少需要3个交易日的数据
+            print(f"数据量不足以计算指标，需要至少3个交易日的数据。", file=sys.stderr)
+            return
+        
+        # 设置Date为索引
+        df = df.set_index('Date')
         
         # 计算PSAR
         psar, psarbull, psarbear = calculate_psar(df['High'], df['Low'], df['Close'])
@@ -156,6 +191,43 @@ def check_psar(stock_code, date=None, days=30):
         print(f"分析过程中出现错误: {str(e)}", file=sys.stderr)
         return None
 
+def analyze_stock(stock_code, date=None, manager=None):
+    """分析股票的PSAR指标并返回结果
+    
+    Args:
+        stock_code (str): 股票代码
+        date (str, optional): 分析日期. Defaults to None.
+        manager (StockDataManager, optional): 数据管理器实例. Defaults to None.
+        
+    Returns:
+        str: 分析结果
+    """
+    try:
+        result = check_psar(stock_code, date, manager=manager)
+        if result is None:
+            return ""
+            
+        # 构建输出字符串
+        output = []
+        output.append(f"\n{stock_code} PSAR分析:")
+        output.append(f"分析日期: {date}")
+        output.append(f"\n价格信息:")
+        output.append(f"当前价格: ${result['current_price']:.2f}")
+        output.append(f"当前SAR: ${result['psar']:.2f}")
+        
+        output.append(f"\n趋势分析:")
+        output.append(f"当前趋势: {result['trend']}")
+        output.append(f"趋势持续: {result['trend_days']}天")
+        output.append(f"趋势强度: {result['trend_strength']}")
+        output.append(f"价格与SAR距离: {result['distance']:.2f}%")
+        output.append(f"趋势转换: {result['trend_change']}")
+        
+        return "\n".join(output)
+        
+    except Exception as e:
+        print(f"分析过程中出现错误: {str(e)}", file=sys.stderr)
+        return ""
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='PSAR指标分析工具')
@@ -167,10 +239,13 @@ def main():
         # 验证并标准化参数
         normalized_codes, analysis_date = validate_and_normalize_params(args.args)
         
+        # 创建数据管理器实例
+        manager = StockDataManager()
+        
         # 分析每个股票
         for stock_code in normalized_codes:
             try:
-                check_psar(stock_code, analysis_date)
+                check_psar(stock_code, analysis_date, manager=manager)
                 if stock_code != normalized_codes[-1]:  # 如果不是最后一个股票，添加分隔线
                     print("\n" + "="*60 + "\n")
             except Exception as e:

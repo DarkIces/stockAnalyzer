@@ -4,7 +4,7 @@ from analyze_stock import (
     ensure_cache_dir,
     check_cache_exists
 )
-from param_utils import validate_and_normalize_params
+from Utils.param_utils import validate_and_normalize_params
 from datetime import datetime
 import pandas as pd
 from tabulate import tabulate
@@ -12,7 +12,7 @@ import os
 import traceback
 import sys
 import wcwidth
-from stock_names import get_stock_name
+from Utils.stock_names import get_stock_name
 from pathlib import Path
 import concurrent.futures
 from typing import List, Dict, Any
@@ -62,12 +62,12 @@ def analyze_single_stock_wrapper(args: tuple) -> Dict[str, Any]:
     包装函数，用于并行处理时分析单只股票
     
     参数:
-    args: (stock_code, date, clear_cache, cache_dir, order, report_only)
+    args: (stock_code, date, clear_cache, cache_dir, order)
     
     返回:
     Dict: 包含股票分析结果的字典
     """
-    stock_code, date, clear_cache, cache_dir, order, report_only = args
+    stock_code, date, clear_cache, cache_dir, order = args
     try:
         # 检查缓存是否存在
         if not clear_cache and check_cache_exists(cache_dir, stock_code):
@@ -75,7 +75,7 @@ def analyze_single_stock_wrapper(args: tuple) -> Dict[str, Any]:
             content = read_cache_file(cache_dir, stock_code)
         else:
             # 如果没有缓存或需要清除缓存，运行分析
-            content = analyze_single_stock(stock_code, date, clear_cache, report_only)
+            content = analyze_single_stock(stock_code, date, clear_cache)
         
         # 从内容中提取关键信息
         lines = content.split('\n')
@@ -330,7 +330,7 @@ def analyze_single_stock_wrapper(args: tuple) -> Dict[str, Any]:
         traceback.print_exc()
         return None
 
-def analyze_stocks(stock_codes: List[str], date: str = None, clear_cache: bool = False, report_only: bool = False) -> None:
+def analyze_stocks(stock_codes: List[str], date: str = None, clear_cache: bool = False) -> str:
     """
     分析多只股票并生成对比报告
     
@@ -338,14 +338,16 @@ def analyze_stocks(stock_codes: List[str], date: str = None, clear_cache: bool =
     stock_codes: 股票代码列表
     date: 分析日期，默认为最近的交易日
     clear_cache: 是否清除缓存
-    report_only: 是否只生成报告
+    
+    返回:
+    str: 分析报告内容
     """
     try:
         # 确保缓存目录存在
         cache_dir = ensure_cache_dir(date)
         
         # 准备参数
-        args_list = [(code, date, clear_cache, cache_dir, i, report_only) 
+        args_list = [(code, date, clear_cache, cache_dir, i) 
                     for i, code in enumerate(stock_codes)]
         
         # 并行处理股票分析
@@ -395,15 +397,17 @@ def analyze_stocks(stock_codes: List[str], date: str = None, clear_cache: bool =
         # 处理表头
         headers = [col_names.get(col, col) for col in df.columns]
         
-        # 打印分析日期
-        if not report_only:
-            print(f"\n分析日期: {date}\n")
+        # 构建报告内容
+        report = []
         
-        # 打印股票对比表格
-        print("股票对比分析:")
-        print(tabulate(df_aligned, headers=headers, tablefmt='grid', showindex=False))
+        # 添加分析日期
+        report.append(f"\n分析日期: {date}\n")
         
-        print("\n市场整体分析:")
+        # 添加股票对比表格
+        report.append("股票对比分析:")
+        report.append(tabulate(df_aligned, headers=headers, tablefmt='grid', showindex=False))
+        
+        report.append("\n市场整体分析:")
         
         # 统计涨跌家数
         def extract_change(x):
@@ -416,69 +420,75 @@ def analyze_stocks(stock_codes: List[str], date: str = None, clear_cache: bool =
         
         up_count = sum(1 for x in df['走势'] if extract_change(x) > 0)
         down_count = sum(1 for x in df['走势'] if extract_change(x) < 0)
-        print(f"1. 涨跌分布: 上涨{up_count}只, 下跌{down_count}只")
+        report.append(f"1. 涨跌分布: 上涨{up_count}只, 下跌{down_count}只")
         
         # 统计均线趋势
         bull_count = sum(1 for x in df['MA趋势'] if '多头排列' in x)
         bear_count = sum(1 for x in df['MA趋势'] if '空头排列' in x)
         mix_count = sum(1 for x in df['MA趋势'] if '均线纠缠' in x)
-        print(f"2. 均线趋势: 多头{bull_count}只, 空头{bear_count}只, 交织{mix_count}只")
+        report.append(f"2. 均线趋势: 多头{bull_count}只, 空头{bear_count}只, 交织{mix_count}只")
         
         # 统计布林带位置
         bb_high = sum(1 for x in df['布林带'] if float(x.split('%]')[0].split('位置')[1]) > 80)
         bb_low = sum(1 for x in df['布林带'] if float(x.split('%]')[0].split('位置')[1]) < 20)
-        print(f"3. 布林带位置: 超买区间{bb_high}只, 超卖区间{bb_low}只")
+        report.append(f"3. 布林带位置: 超买区间{bb_high}只, 超卖区间{bb_low}只")
         
         # 统计KDJ状态
         kdj_high = sum(1 for x in df['KDJ'] if '超买' in x)
         kdj_low = sum(1 for x in df['KDJ'] if '超卖' in x)
-        print(f"4. KDJ状态: 超买{kdj_high}只, 超卖{kdj_low}只")
+        report.append(f"4. KDJ状态: 超买{kdj_high}只, 超卖{kdj_low}只")
         
         # 统计RSI状态
         rsi_high = sum(1 for x in df['RSI'] if '超买' in x)
         rsi_low = sum(1 for x in df['RSI'] if '超卖' in x)
-        print(f"5. RSI状态: 超买{rsi_high}只, 超卖{rsi_low}只")
+        report.append(f"5. RSI状态: 超买{rsi_high}只, 超卖{rsi_low}只")
         
         # 市场综合判断
-        print("\n市场综合判断:")
+        report.append("\n市场综合判断:")
         
         # 根据涨跌分布判断市场强弱
         if up_count > down_count * 2:
-            print("1. 市场强度: 非常强势 [🔥🔥]")
+            report.append("1. 市场强度: 非常强势 [🔥🔥]")
         elif up_count > down_count:
-            print("1. 市场强度: 偏强 [🔥]")
+            report.append("1. 市场强度: 偏强 [🔥]")
         elif down_count > up_count * 2:
-            print("1. 市场强度: 非常弱势 [❄️❄️]")
+            report.append("1. 市场强度: 非常弱势 [❄️❄️]")
         elif down_count > up_count:
-            print("1. 市场强度: 偏弱 [❄️]")
+            report.append("1. 市场强度: 偏弱 [❄️]")
         else:
-            print("1. 市场强度: 平衡 [⚖️]")
+            report.append("1. 市场强度: 平衡 [⚖️]")
         
         # 根据技术指标判断市场风险
         risk_high = bb_high + kdj_high + rsi_high
         risk_low = bb_low + kdj_low + rsi_low
         if risk_high > risk_low * 2:
-            print("2. 市场风险: 超买严重，调整风险高 [⚠️⚠️]")
+            report.append("2. 市场风险: 超买严重，调整风险高 [⚠️⚠️]")
         elif risk_high > risk_low:
-            print("2. 市场风险: 偏向超买，需要注意 [⚠️]")
+            report.append("2. 市场风险: 偏向超买，需要注意 [⚠️]")
         elif risk_low > risk_high * 2:
-            print("2. 市场风险: 超卖严重，反弹机会大 [💡💡]")
+            report.append("2. 市场风险: 超卖严重，反弹机会大 [💡💡]")
         elif risk_low > risk_high:
-            print("2. 市场风险: 偏向超卖，可以关注 [💡]")
+            report.append("2. 市场风险: 偏向超卖，可以关注 [💡]")
         else:
-            print("2. 市场风险: 风险适中 [⚖️]")
+            report.append("2. 市场风险: 风险适中 [⚖️]")
         
         # 根据MA趋势判断市场趋势
         if bull_count > bear_count * 2:
-            print("3. 市场趋势: 强势上涨 [📈📈]")
+            report.append("3. 市场趋势: 强势上涨 [📈📈]")
         elif bull_count > bear_count:
-            print("3. 市场趋势: 温和上涨 [📈]")
+            report.append("3. 市场趋势: 温和上涨 [📈]")
         elif bear_count > bull_count * 2:
-            print("3. 市场趋势: 强势下跌 [📉📉]")
+            report.append("3. 市场趋势: 强势下跌 [📉📉]")
         elif bear_count > bull_count:
-            print("3. 市场趋势: 温和下跌 [📉]")
+            report.append("3. 市场趋势: 温和下跌 [📉]")
         else:
-            print("3. 市场趋势: 横盘整理 [➡️]")
+            report.append("3. 市场趋势: 横盘整理 [➡️]")
+        
+        # 打印报告内容
+        report_content = '\n'.join(report)
+        print(report_content)
+        
+        return report_content
         
     except Exception as e:
         # 将错误信息打印到stderr
@@ -492,7 +502,6 @@ def main():
     parser = argparse.ArgumentParser(description='股票对比分析工具')
     parser.add_argument('args', nargs='+', help='股票代码和日期参数（日期可选，支持YYYY-MM-DD、YYYY.MM.DD、YYYY/MM/DD、YYYYMMDD格式）')
     parser.add_argument('--clear-cache', action='store_true', help='清除缓存数据')
-    parser.add_argument('--report-only', action='store_true', help='只输出报告，不显示分析过程')
     
     args = parser.parse_args()
     
@@ -501,7 +510,7 @@ def main():
         normalized_codes, analysis_date = validate_and_normalize_params(args.args)
         
         # 分析股票
-        analyze_stocks(normalized_codes, analysis_date, args.clear_cache, args.report_only)
+        analyze_stocks(normalized_codes, analysis_date, args.clear_cache)
                 
     except Exception as e:
         # 将错误信息打印到stderr

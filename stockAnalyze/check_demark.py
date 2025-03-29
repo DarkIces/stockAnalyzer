@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 import sys
 import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import argparse
-from param_utils import validate_and_normalize_params
+from Utils.param_utils import validate_and_normalize_params
+from Utils.stock_data_manager import StockDataManager
+import traceback
+
+# 确保stdout和stderr使用UTF-8编码
+if not isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+if not isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 def debug_print(*args, **kwargs):
     pass
@@ -17,7 +22,8 @@ def debug_print(*args, **kwargs):
 def info_print(*args, **kwargs):
     kwargs['flush'] = True
     if 'file' not in kwargs:
-        print(*args, **kwargs)
+        kwargs['file'] = sys.stdout
+    print(*args, **kwargs)
 
 def calculate_demark_signals(df):
     """
@@ -186,7 +192,7 @@ def calculate_demark_signals(df):
         debug_print(f"发生错误: {e}")
         return None, None, None, None, None
 
-def check_demark(symbol, target_date=None, days=30, report_only=False):
+def check_demark(symbol, target_date=None, days=30, manager=None):
     """
     检查指定股票的Demark信号
     """
@@ -200,121 +206,122 @@ def check_demark(symbol, target_date=None, days=30, report_only=False):
             try:
                 target_date = pd.to_datetime(target_date)
             except Exception as e:
-                return
+                info_print(f"日期格式错误: {e}")
+                return ""
         
         # 计算查询日期范围
         query_end_date = target_date + timedelta(days=1)
         query_start_date = target_date - timedelta(days=days)
         
         try:
-            # 获取数据
-            stock = yf.Ticker(symbol)
-            df = stock.history(start=query_start_date, end=query_end_date)
+            # 使用传入的manager或创建新的
+            if manager is None:
+                manager = StockDataManager()
+            df, from_yf = manager.get_stock_data(symbol, query_start_date.strftime('%Y-%m-%d'), query_end_date.strftime('%Y-%m-%d'))
             
-            if df.empty:
-                return
+            if df is None or df.empty:
+                info_print(f"未获取到{symbol}的数据")
+                return ""
+            
+            # 确保数据按日期排序
+            df = df.set_index('Date').sort_index()
             
             # 计算Demark信号
             df, last_up_signal9_date, last_down_signal9_date, last_up_signal13_date, last_down_signal13_date = calculate_demark_signals(df)
+            
+            if df is None:
+                info_print(f"计算{symbol}的Demark信号时发生错误")
+                return ""
             
             # 获取目标日期的数据
             target_data = df[df.index.date == target_date.date()]
             
             if target_data.empty:
-                return
+                info_print(f"未找到{symbol}在{target_date.strftime('%Y-%m-%d')}的数据")
+                return ""
             
-            # 输出分析结果
-            info_print(f"\n{symbol} Demark信号分析:")
-            info_print(f"分析日期: {target_date.strftime('%Y-%m-%d')}")
-            info_print(f"当前价格: {target_data['Close'].iloc[0]:.2f}")
-            info_print(f"4天前价格: {target_data['Close_4d_ago'].iloc[0]:.2f}")
-            info_print(f"2天前价格: {target_data['Close_2d_ago'].iloc[0]:.2f}")
+            # 构建输出结果
+            output = []
+            output.append(f"\n{symbol} Demark信号分析:")
+            output.append(f"分析日期: {target_date.strftime('%Y-%m-%d')}")
+            output.append(f"当前价格: {target_data['Close'].iloc[0]:.2f}")
+            output.append(f"4天前价格: {target_data['Close_4d_ago'].iloc[0]:.2f}")
+            output.append(f"2天前价格: {target_data['Close_2d_ago'].iloc[0]:.2f}")
             
             # 打印计数情况
-            info_print(f"\nDemark指标计数:")
-            info_print(f"上升9计数: {target_data['Up_Count_9'].iloc[0]:.0f}")
-            info_print(f"上升13计数: {target_data['Up_Count_13'].iloc[0]:.0f}/4")
-            info_print(f"下降9计数: {target_data['Down_Count_9'].iloc[0]:.0f}")
-            info_print(f"下降13计数: {target_data['Down_Count_13'].iloc[0]:.0f}/4")
+            output.append(f"\nDemark指标计数:")
+            output.append(f"上升9计数: {target_data['Up_Count_9'].iloc[0]}")
+            output.append(f"上升13计数: {target_data['Up_Count_13'].iloc[0]}/4")
+            output.append(f"下降9计数: {target_data['Down_Count_9'].iloc[0]}")
+            output.append(f"下降13计数: {target_data['Down_Count_13'].iloc[0]}/4")
             
-            # 显示最近信号触发情况
-            info_print("\n最近信号触发情况:")
-            if last_up_signal9_date is not None:
-                info_print(f"上升9信号最近触发于: {last_up_signal9_date.strftime('%Y-%m-%d')}")
+            # 打印信号情况
+            output.append("\nDemark信号:")
+            if target_data['Up_Signal_9'].iloc[0]:
+                output.append("检测到上升Demark警告(9计数: 9/9)")
+            if target_data['Up_Signal_13'].iloc[0]:
+                output.append("检测到上升Demark警告(13计数: 4/4)")
+            if target_data['Down_Signal_9'].iloc[0]:
+                output.append("检测到下降Demark警告(9计数: 9/9)")
+            if target_data['Down_Signal_13'].iloc[0]:
+                output.append("检测到下降Demark警告(13计数: 4/4)")
             
-            if last_down_signal9_date is not None:
-                info_print(f"下降9信号最近触发于: {last_down_signal9_date.strftime('%Y-%m-%d')}")
+            # 如果没有检测到信号
+            if not any([target_data['Up_Signal_9'].iloc[0], target_data['Up_Signal_13'].iloc[0],
+                       target_data['Down_Signal_9'].iloc[0], target_data['Down_Signal_13'].iloc[0]]):
+                output.append("未检测到Demark信号")
             
-            if last_up_signal13_date is not None:
-                info_print(f"上升13信号最近触发于: {last_up_signal13_date.strftime('%Y-%m-%d')}")
+            # 打印最近信号日期
+            output.append("\n最近信号日期:")
+            if last_up_signal9_date:
+                output.append(f"最近上升9信号: {last_up_signal9_date.strftime('%Y-%m-%d')}")
+            if last_up_signal13_date:
+                output.append(f"最近上升13信号: {last_up_signal13_date.strftime('%Y-%m-%d')}")
+            if last_down_signal9_date:
+                output.append(f"最近下降9信号: {last_down_signal9_date.strftime('%Y-%m-%d')}")
+            if last_down_signal13_date:
+                output.append(f"最近下降13信号: {last_down_signal13_date.strftime('%Y-%m-%d')}")
             
-            if last_down_signal13_date is not None:
-                info_print(f"下降13信号最近触发于: {last_down_signal13_date.strftime('%Y-%m-%d')}")
+            result = "\n".join(output)
+            info_print(result)
+            return result
             
-            # 输出信号状态
-            signals_detected = False
-            signals = []
-            
-            if target_data['Up_Count_9'].iloc[0] >= 6:
-                signals.append(f"上升Demark警告(9计数: {target_data['Up_Count_9'].iloc[0]}/9)")
-                signals_detected = True
-            elif target_data['Up_Signal_9'].iloc[0]:
-                signals.append("上升Demark9信号")
-                signals_detected = True
-                
-            if target_data['Up_Count_13'].iloc[0] >= 2:
-                signals.append(f"上升Demark警告(13计数: {target_data['Up_Count_13'].iloc[0]}/4)")
-                signals_detected = True
-            elif target_data['Up_Signal_13'].iloc[0]:
-                signals.append("上升Demark13信号")
-                signals_detected = True
-                
-            if target_data['Down_Count_9'].iloc[0] >= 6:
-                signals.append(f"下降Demark警告(9计数: {target_data['Down_Count_9'].iloc[0]}/9)")
-                signals_detected = True
-            elif target_data['Down_Signal_9'].iloc[0]:
-                signals.append("下降Demark9信号")
-                signals_detected = True
-                
-            if target_data['Down_Count_13'].iloc[0] >= 2:
-                signals.append(f"下降Demark警告(13计数: {target_data['Down_Count_13'].iloc[0]}/4)")
-                signals_detected = True
-            elif target_data['Down_Signal_13'].iloc[0]:
-                signals.append("下降Demark13信号")
-                signals_detected = True
-                
-            if signals:
-                info_print("\nDemark信号:")
-                for signal in signals:
-                    info_print(f"- {signal}")
-            else:
-                info_print("\n当前未形成完整的Demark信号")
-            
-            # 输出趋势分析
-            up_count = target_data['Up_Count_9'].iloc[0] + target_data['Up_Count_13'].iloc[0]
-            down_count = target_data['Down_Count_9'].iloc[0] + target_data['Down_Count_13'].iloc[0]
-            
-            if up_count > down_count:
-                info_print("趋势分析: 上升趋势占优")
-            elif down_count > up_count:
-                info_print("趋势分析: 下降趋势占优")
-            else:
-                info_print("趋势分析: 趋势不明显")
-            
-            # 输出价格位置
-            if target_data['Close'].iloc[0] > target_data['Close_4d_ago'].iloc[0]:
-                info_print(f"价格位置: 当前价格高于4天前价格 (+{target_data['Close'].iloc[0] - target_data['Close_4d_ago'].iloc[0]:.2f})")
-            else:
-                info_print(f"价格位置: 当前价格低于4天前价格 ({target_data['Close'].iloc[0] - target_data['Close_4d_ago'].iloc[0]:.2f})")
-        
         except Exception as e:
-            debug_print(f"发生错误: {e}")
+            error_msg = f"分析{symbol}时发生错误: {str(e)}"
+            info_print(error_msg)
+            return ""
+            
     except Exception as e:
-        debug_print(f"发生错误: {e}")
+        error_msg = f"分析{symbol}时发生错误: {str(e)}"
+        info_print(error_msg)
+        return ""
+
+def analyze_stock(symbol, target_date=None, manager=None):
+    """
+    分析股票的Demark信号
+    
+    参数:
+    symbol (str): 股票代码
+    target_date (str): 分析日期，格式为YYYY-MM-DD
+    manager (StockDataManager): 数据管理器实例
+    
+    返回:
+    str: 分析结果
+    """
+    try:
+        result = check_demark(symbol, target_date, days=30, manager=manager)
+        if not result:
+            print(f"警告: Demark分析未返回结果", file=sys.stderr)
+            return ""
+        return result
+    except Exception as e:
+        print(f"分析{symbol}时发生错误: {str(e)}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+        return ""
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='Demark指标分析工具')
+    parser = argparse.ArgumentParser(description='检查股票的Demark信号')
     parser.add_argument('args', nargs='+', help='股票代码和日期参数（日期可选，支持YYYY-MM-DD、YYYY.MM.DD、YYYY/MM/DD、YYYYMMDD格式）')
     
     args = parser.parse_args()
@@ -326,7 +333,7 @@ def main():
         # 分析每个股票
         for stock_code in normalized_codes:
             try:
-                check_demark(stock_code, analysis_date)
+                analyze_stock(stock_code, analysis_date)
                 if stock_code != normalized_codes[-1]:  # 如果不是最后一个股票，添加分隔线
                     print("\n" + "="*60 + "\n")
             except Exception as e:

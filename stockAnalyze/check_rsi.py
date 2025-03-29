@@ -6,17 +6,28 @@ from datetime import datetime, timedelta
 import sys
 import io
 import argparse
-from param_utils import validate_and_normalize_params
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+from Utils.param_utils import validate_and_normalize_params
+from Utils.stock_data_manager import StockDataManager
+
+# 确保stdout和stderr使用UTF-8编码
+if not isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+if not isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 def debug_print(*args, **kwargs):
-    pass
-
-def info_print(*args, **kwargs):
+    """打印调试信息"""
     kwargs['flush'] = True
     if 'file' not in kwargs:
-        print(*args, **kwargs)
+        kwargs['file'] = sys.stderr
+    print(*args, **kwargs)
+
+def info_print(*args, **kwargs):
+    """打印信息"""
+    kwargs['flush'] = True
+    if 'file' not in kwargs:
+        kwargs['file'] = sys.stdout
+    print(*args, **kwargs)
 
 def calculate_rma(series, period):
     """
@@ -71,13 +82,13 @@ def calculate_rsi(df, periods=[6, 12, 24]):
         
     return rsi_df
 
-def find_divergence(df, kdj, mid_term_days=30):
+def find_divergence(df, rsi, mid_term_days=30):
     """
     检测RSI指标与价格之间的背离现象
     
     参数:
     df (DataFrame): 包含价格数据的DataFrame
-    kdj (DataFrame): 包含RSI指标的DataFrame
+    rsi (DataFrame): 包含RSI指标的DataFrame
     mid_term_days (int): 分析天数
     
     返回:
@@ -88,48 +99,68 @@ def find_divergence(df, kdj, mid_term_days=30):
         ("", mid_term_days)
     ]
     
+    # 确保rsi DataFrame也有Date列
+    rsi['Date'] = df['Date']
+    
     # 获取当前日期（最后一个交易日）
-    current_date = df.index[-1]
+    current_date = df['Date'].max()
     
     # 过滤掉未来数据
-    df = df[df.index <= current_date]
-    kdj = kdj[kdj.index <= current_date]
+    df = df[df['Date'] <= current_date]
+    rsi = rsi[rsi['Date'] <= current_date]
     
     # 获取当前日期（最后一个交易日）
-    current_date = df.index[-1]
+    current_date = df['Date'].max()
     current_price = df['Close'].iloc[-1]
-    current_rsi = kdj['RSI_6'].iloc[-1]  # 使用RSI_6进行分析
+    current_rsi = rsi['RSI_6'].iloc[-1]  # 使用RSI_6进行分析
     
-    def find_last_cross_index(rsi_series):
-        """找到最近的RSI交叉点"""
-        for i in range(len(rsi_series)-2, 0, -1):
-            # 检查是否发生交叉（上穿或下穿）
-            if ((rsi_series.iloc[i] > rsi_series.iloc[i-1] and rsi_series.iloc[i] > rsi_series.iloc[i+1]) or
-                (rsi_series.iloc[i] < rsi_series.iloc[i-1] and rsi_series.iloc[i] < rsi_series.iloc[i+1])):
-                return i
-        return 0
+    def find_last_cross_index(rsi_6, rsi_12):
+        """找到最近的RSI(6)和RSI(12)交叉点"""
+        for i in range(len(rsi_6)-2, 0, -1):
+            # 检查是否发生交叉
+            prev_diff = rsi_6.iloc[i-1] - rsi_12.iloc[i-1]
+            curr_diff = rsi_6.iloc[i] - rsi_12.iloc[i]
+            next_diff = rsi_6.iloc[i+1] - rsi_12.iloc[i+1]
+            
+            # 上穿：前一个差值小于0，当前差值大于0
+            up_cross = prev_diff < 0 and curr_diff > 0
+            
+            # 下穿：前一个差值大于0，当前差值小于0
+            down_cross = prev_diff > 0 and curr_diff < 0
+            
+            if up_cross or down_cross:
+                return i, up_cross, prev_diff, curr_diff
+        return 0, False, None, None
     
     for period_name, days in periods:
         try:
             # 获取最近N天的数据
             recent_df = df.tail(days)
-            recent_rsi = kdj.tail(days)
+            recent_rsi = rsi.tail(days)
             
             if len(recent_df) < days:
                 messages.append(f"数据不足{days}天，无法进行完整分析")
                 continue
             
             # 找到最近的RSI交叉点
-            last_cross_idx = find_last_cross_index(recent_rsi['RSI_6'])
+            last_cross_idx, is_up_cross, prev_diff, curr_diff = find_last_cross_index(
+                recent_rsi['RSI_6'], 
+                recent_rsi['RSI_12']
+            )
+            
             if last_cross_idx > 0:
                 # 只使用交叉点之后的数据
                 recent_df = recent_df.iloc[last_cross_idx:]
                 recent_rsi = recent_rsi.iloc[last_cross_idx:]
-                messages.append(f"\n分析从最近的RSI交叉点({recent_df.index[0].strftime('%Y-%m-%d')})开始")
+                cross_type = "上穿" if is_up_cross else "下穿"
+                messages.append(f"\n分析从最近的RSI(6){cross_type}RSI(12)点({recent_df['Date'].iloc[0].strftime('%Y-%m-%d')})开始")
+                messages.append(f"交叉点差值: {prev_diff:.2f} -> {curr_diff:.2f}")
+                messages.append(f"RSI(6): {recent_rsi['RSI_6'].iloc[0]:.2f}, RSI(12): {recent_rsi['RSI_12'].iloc[0]:.2f}")
             
             # 分析所有数据点
             price_series = recent_df['Close']
             rsi_series = recent_rsi['RSI_6']  # 使用RSI_6进行分析
+            date_series = recent_df['Date']
             
             # 找到所有局部高点（比前后点都高的点）
             highs = []
@@ -137,7 +168,7 @@ def find_divergence(df, kdj, mid_term_days=30):
                 if (price_series.iloc[i] > price_series.iloc[i-1] and 
                     price_series.iloc[i] > price_series.iloc[i+1]):
                     highs.append({
-                        'date': price_series.index[i],
+                        'date': date_series.iloc[i],
                         'price': price_series.iloc[i],
                         'rsi': rsi_series.iloc[i]
                     })
@@ -148,7 +179,7 @@ def find_divergence(df, kdj, mid_term_days=30):
                 if (price_series.iloc[i] < price_series.iloc[i-1] and 
                     price_series.iloc[i] < price_series.iloc[i+1]):
                     lows.append({
-                        'date': price_series.index[i],
+                        'date': date_series.iloc[i],
                         'price': price_series.iloc[i],
                         'rsi': rsi_series.iloc[i]
                     })
@@ -193,181 +224,125 @@ def find_divergence(df, kdj, mid_term_days=30):
     
     return top_divergence, bottom_divergence, "\n".join(messages)
 
-def analyze_rsi(symbol, end_date=None):
+def analyze_rsi(symbol, end_date=None, manager=None):
     """
     获取并显示股票的RSI指标值
+    
+    参数:
+    symbol (str): 股票代码或公司名称
+    end_date (str or datetime, optional): 结束日期，格式为'YYYY-MM-DD'，默认为当前日期
+    manager (StockDataManager, optional): 数据管理器实例
+    
+    返回:
+    str: 分析结果
     """
     try:
-        # 获取股票数据
-        info_print(f"\n正在获取 {symbol} 的数据...")
-        
-        # 如果没有指定结束日期，使用当前日期
+        # 处理结束日期
         if end_date is None:
-            target_date = datetime.now().date()
-        else:
-            target_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+            end_date = datetime.now()
+        elif isinstance(end_date, str):
+            end_date = datetime.strptime(end_date, '%Y-%m-%d')
             
-        # 为了确保获取到目标日期的数据，将结束日期延后一天
-        query_end_date = (target_date + timedelta(days=1)).strftime('%Y-%m-%d')
-        # 计算开始日期（往前推90天）
-        start_date = (target_date - timedelta(days=90)).strftime('%Y-%m-%d')
+        # 检查目标日期是否超过当前日期
+        current_date = datetime.now()
+        if end_date > current_date:
+            debug_print(f"目标日期 {end_date.strftime('%Y-%m-%d')} 超过当前日期 {current_date.strftime('%Y-%m-%d')}，无法获取未来数据。")
+            return ""
+            
+        # 为了确保获取到指定日期的数据，将结束日期延后一天
+        query_end_date = end_date + timedelta(days=1)
         
-        # 使用yfinance获取数据
-        stock = yf.Ticker(symbol)
-        df = stock.history(start=start_date, end=query_end_date)
+        # 获取股票数据
+        if manager is None:
+            manager = StockDataManager()
+            
+        # 为了计算RSI指标和进行背离分析，我们需要获取足够的历史数据
+        # 计算200天前的日期
+        history_start_date = (end_date - timedelta(days=400)).strftime('%Y-%m-%d')
+        df, from_yf = manager.get_stock_data(symbol, start_date=history_start_date, end_date=query_end_date.strftime('%Y-%m-%d'))
         
-        if df.empty:
-            info_print(f"错误：未找到 {symbol} 的数据")
-            return None
+        if df is None or df.empty:
+            debug_print(f"无法获取 {symbol} 的数据。")
+            return ""
+            
+        # 确保数据格式正确
+        df['Date'] = pd.to_datetime(df['Date'])
+        
+        # 按日期排序
+        df = df.sort_values('Date').reset_index(drop=True)
             
         # 确保我们使用的是指定日期的数据
-        if target_date not in df.index.date:
-            info_print(f"错误：未找到 {target_date} 的数据")
-            info_print(f"可用的最近交易日期: {df.index[-1].date()}")
-            return None
+        target_date = end_date.strftime('%Y-%m-%d')
+        df_target = df[df['Date'] == target_date]
+        
+        if df_target.empty:
+            debug_print(f"无法获取 {symbol} 在 {target_date} 的数据。")
+            return ""
+            
+        # 获取指定日期的数据索引
+        target_idx = df_target.index[0]
+        
+        # 确保有足够的历史数据来计算RSI指标
+        if target_idx < 24:  # 需要至少24个交易日的数据
+            debug_print(f"历史数据不足，无法计算RSI指标。当前数据点: {target_idx + 1}")
+            return ""
             
         # 计算RSI指标
-        rsi = calculate_rsi(df)
+        rsi_df = calculate_rsi(df)
         
-        # 获取指定日期的数据索引
-        target_mask = df.index.date == target_date
-        target_idx = df.index.get_loc(df.index[target_mask][0])
+        # 获取目标日期的RSI值
+        rsi6 = rsi_df['RSI_6'].iloc[target_idx]
+        rsi12 = rsi_df['RSI_12'].iloc[target_idx]
+        rsi24 = rsi_df['RSI_24'].iloc[target_idx]
         
-        # 获取最新值
-        rsi_6 = rsi['RSI_6'].iloc[target_idx]
-        rsi_12 = rsi['RSI_12'].iloc[target_idx]
-        rsi_24 = rsi['RSI_24'].iloc[target_idx]
+        # 构建输出结果
+        output = []
+        output.append(f"\n{symbol} RSI指标分析:")
+        output.append(f"分析日期: {target_date}")
+        output.append(f"RSI(6): {rsi6:.2f}")
+        output.append(f"RSI(12): {rsi12:.2f}")
+        output.append(f"RSI(24): {rsi24:.2f}")
         
-        # 计算RSI背离
-        top_divergence, bottom_divergence, divergence_info = find_divergence(df.iloc[:target_idx+1], rsi.iloc[:target_idx+1])
-        
-        # 输出结果
-        info_print(f"\n{symbol} RSI指标分析:")
-        info_print(f"分析日期: {target_date}")
-        info_print(f"RSI(6): {rsi_6:.2f}")
-        info_print(f"RSI(12): {rsi_12:.2f}")
-        info_print(f"RSI(24): {rsi_24:.2f}")
-        
-        # 输出背离分析结果
-        info_print("\nRSI背离分析:")
-        if top_divergence:
-            info_print("检测到看跌背离:")
-            info_print(divergence_info)
-        elif bottom_divergence:
-            info_print("检测到看涨背离:")
-            info_print(divergence_info)
-        else:
-            info_print("未检测到明显背离")
-            info_print(divergence_info)
-        
-        # 分析RSI指标
-        info_print("\n趋势分析:")
-        if rsi_6 > rsi_12 and rsi_12 > rsi_24:
-            info_print("短中长期RSI均显示上升趋势")
-        elif rsi_6 < rsi_12 and rsi_12 < rsi_24:
-            info_print("短中长期RSI均显示下降趋势")
-        else:
-            info_print("RSI趋势不明确，可能处于盘整阶段")
+        # 判断RSI状态
+        status = "正常"
+        if rsi6 > 95 or rsi12 > 90 or rsi24 > 85:
+            status = "严重超买"
+        elif rsi6 > 85 or rsi12 > 80 or rsi24 > 75:
+            status = "超买"
+        elif rsi6 < 5 or rsi12 < 10 or rsi24 < 15:
+            status = "严重超卖"
+        elif rsi6 < 15 or rsi12 < 20 or rsi24 < 25:
+            status = "超卖"
             
-        # 超买超卖分析
-        info_print("\n超买超卖分析:")
+        output.append(f"\nRSI状态: {status}")
         
-        # RSI(6)分析
-        if rsi_6 > 90:
-            info_print("RSI(6)处于严重超买区间，短期极有可能回调")
-            rsi_status = '严重超买'
-        elif rsi_6 > 80:
-            info_print("RSI(6)处于超买区间，短期可能面临回调")
-            rsi_status = '超买'
-        elif rsi_6 < 10:
-            info_print("RSI(6)处于严重超卖区间，短期极有可能反弹")
-            rsi_status = '严重超卖'
-        elif rsi_6 < 20:
-            info_print("RSI(6)处于超卖区间，短期可能出现反弹")
-            rsi_status = '超卖'
-        else:
-            info_print("RSI(6)在正常区间")
-            rsi_status = '正常'
+        # 检查背离
+        _, _, divergence_msg = find_divergence(df, rsi_df)
+        if divergence_msg:
+            output.append(divergence_msg)
+        
+        result = "\n".join(output)
+        info_print(result)
+        return result
             
-        # RSI(12)分析
-        if rsi_12 > 90:
-            info_print("RSI(12)处于严重超买区间，中期极有可能回调")
-        elif rsi_12 > 80:
-            info_print("RSI(12)处于超买区间，中期可能面临回调")
-        elif rsi_12 < 10:
-            info_print("RSI(12)处于严重超卖区间，中期极有可能反弹")
-        elif rsi_12 < 20:
-            info_print("RSI(12)处于超卖区间，中期可能出现反弹")
-        else:
-            info_print("RSI(12)在正常区间")
-            
-        # RSI(24)分析
-        if rsi_24 > 90:
-            info_print("RSI(24)处于严重超买区间，长期极有可能回调")
-        elif rsi_24 > 80:
-            info_print("RSI(24)处于超买区间，长期可能面临回调")
-        elif rsi_24 < 10:
-            info_print("RSI(24)处于严重超卖区间，长期极有可能反弹")
-        elif rsi_24 < 20:
-            info_print("RSI(24)处于超卖区间，长期可能出现反弹")
-        else:
-            info_print("RSI(24)在正常区间")
-            
-        # 综合分析
-        severe_overbought = sum([
-            1 if rsi_6 > 90 else 0,
-            1 if rsi_12 > 90 else 0,
-            1 if rsi_24 > 90 else 0
-        ])
-        
-        overbought = sum([
-            1 if 80 < rsi_6 <= 90 else 0,
-            1 if 80 < rsi_12 <= 90 else 0,
-            1 if 80 < rsi_24 <= 90 else 0
-        ])
-        
-        severe_oversold = sum([
-            1 if rsi_6 < 10 else 0,
-            1 if rsi_12 < 10 else 0,
-            1 if rsi_24 < 10 else 0
-        ])
-        
-        oversold = sum([
-            1 if 10 <= rsi_6 < 20 else 0,
-            1 if 10 <= rsi_12 < 20 else 0,
-            1 if 10 <= rsi_24 < 20 else 0
-        ])
-        
-        info_print("\n综合诊断:")
-        if severe_overbought >= 2:
-            info_print("警告：多个RSI指标处于严重超买区间，极有可能出现显著回调")
-        elif overbought >= 2:
-            info_print("警告：多个RSI指标处于超买区间，建议保持谨慎，注意回调风险")
-        elif severe_oversold >= 2:
-            info_print("提示：多个RSI指标处于严重超卖区间，极有可能出现显著反弹")
-        elif oversold >= 2:
-            info_print("提示：多个RSI指标处于超卖区间，可能存在反弹机会")
-        else:
-            if max(rsi_6, rsi_12, rsi_24) > 70:
-                info_print("RSI指标偏高，建议保持谨慎")
-                if rsi_6 > 90:
-                    info_print("特别提示：短期RSI已达到严重超买水平，极有可能出现回调")
-                elif rsi_6 > 80:
-                    info_print("特别提示：短期RSI已达到超买水平，注意回调风险")
-            elif min(rsi_6, rsi_12, rsi_24) < 30:
-                info_print("RSI指标偏低，可能存在反弹机会")
-                if rsi_6 < 10:
-                    info_print("特别提示：短期RSI已达到严重超卖水平，极有可能出现反弹")
-                elif rsi_6 < 20:
-                    info_print("特别提示：短期RSI已达到超卖水平，关注反弹机会")
-            else:
-                info_print("RSI指标处于中性区间，建议观察其他技术指标")
-        
-        return rsi.iloc[target_idx]
-        
     except Exception as e:
-        debug_print(f"发生错误: {str(e)}")
-        return None
+        error_msg = f"分析过程中出现错误: {str(e)}"
+        debug_print(error_msg)
+        return ""
+
+def analyze_stock(symbol, target_date=None, manager=None):
+    """
+    分析股票的RSI指标
+    
+    参数:
+    symbol (str): 股票代码
+    target_date (str): 分析日期，格式为YYYY-MM-DD
+    manager (StockDataManager): 数据管理器实例
+    
+    返回:
+    str: 分析结果
+    """
+    return analyze_rsi(symbol, target_date, manager=manager)
 
 def main():
     """主函数"""
@@ -380,10 +355,13 @@ def main():
         # 验证并标准化参数
         normalized_codes, analysis_date = validate_and_normalize_params(args.args)
         
+        # 创建数据管理器实例
+        manager = StockDataManager()
+        
         # 分析每个股票
         for stock_code in normalized_codes:
             try:
-                analyze_rsi(stock_code, analysis_date)
+                analyze_rsi(stock_code, analysis_date, manager=manager)
                 if stock_code != normalized_codes[-1]:  # 如果不是最后一个股票，添加分隔线
                     print("\n" + "="*60 + "\n")
             except Exception as e:

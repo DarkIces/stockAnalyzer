@@ -1,22 +1,29 @@
 # -*- coding: utf-8 -*-
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import sys
 import io
 import argparse
-from param_utils import validate_and_normalize_params
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+from Utils.param_utils import validate_and_normalize_params
+from Utils.stock_data_manager import StockDataManager
+
+# 确保stdout和stderr使用UTF-8编码
+if not isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+if not isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 def debug_print(*args, **kwargs):
-    pass
+    if 'file' not in kwargs:
+        kwargs['file'] = sys.stderr
+    print(*args, **kwargs)
 
 def info_print(*args, **kwargs):
     kwargs['flush'] = True
     if 'file' not in kwargs:
-        print(*args, **kwargs)
+        kwargs['file'] = sys.stdout
+    print(*args, **kwargs)
 
 def find_last_cross_index(kdj_df):
     """
@@ -55,11 +62,11 @@ def find_divergence(df, kdj, mid_term_days=30):
     ]
     
     # 获取当前日期（最后一个交易日）
-    current_date = df.index[-1]
+    current_date = df['Date'].max()
     
     # 过滤掉未来数据
-    df = df[df.index <= current_date]
-    kdj = kdj[kdj.index <= current_date]
+    df = df[df['Date'] <= current_date]
+    kdj = kdj[kdj['Date'] <= current_date]
     
     def find_last_cross_index(k_series, d_series):
         """找到最近的KD交叉点"""
@@ -90,11 +97,16 @@ def find_divergence(df, kdj, mid_term_days=30):
                 # 只使用交叉点之后的数据
                 recent_df = recent_df.iloc[last_cross_idx:]
                 recent_kdj = recent_kdj.iloc[last_cross_idx:]
-                messages.append(f"\n分析从最近的KD交叉点({recent_df.index[0].strftime('%Y-%m-%d')})开始")
+                messages.append(f"\n从最近的KD交叉点({recent_df['Date'].iloc[0].strftime('%Y-%m-%d')})开始分析背离")
+                messages.append(f"分析区间: {recent_df['Date'].iloc[0].strftime('%Y-%m-%d')} 至 {recent_df['Date'].iloc[-1].strftime('%Y-%m-%d')}")
+            else:
+                messages.append("\n在分析周期内未发现KD交叉点，使用全部数据进行分析")
+                messages.append(f"分析区间: {recent_df['Date'].iloc[0].strftime('%Y-%m-%d')} 至 {recent_df['Date'].iloc[-1].strftime('%Y-%m-%d')}")
             
             # 分析所有数据点
             price_series = recent_df['Close']
             j_series = recent_kdj['J']
+            date_series = recent_df['Date']
             
             # 找到所有价格低点（比邻近点都低的点）
             price_lows = []
@@ -106,7 +118,7 @@ def find_divergence(df, kdj, mid_term_days=30):
                     price_series.iloc[i] < price_series.iloc[i+1]):
                     price_lows.append(price_series.iloc[i])
                     j_at_price_lows.append(j_series.iloc[i])
-                    dates_at_price_lows.append(price_series.index[i])
+                    dates_at_price_lows.append(date_series.iloc[i])
             
             # 找到所有价格高点
             price_highs = []
@@ -118,7 +130,7 @@ def find_divergence(df, kdj, mid_term_days=30):
                     price_series.iloc[i] > price_series.iloc[i+1]):
                     price_highs.append(price_series.iloc[i])
                     j_at_price_highs.append(j_series.iloc[i])
-                    dates_at_price_highs.append(price_series.index[i])
+                    dates_at_price_highs.append(date_series.iloc[i])
             
             # 找到所有J值低点和高点
             j_lows = []
@@ -134,15 +146,14 @@ def find_divergence(df, kdj, mid_term_days=30):
                     j_series.iloc[i] < j_series.iloc[i+1]):
                     j_lows.append(j_series.iloc[i])
                     price_at_j_lows.append(price_series.iloc[i])
-                    dates_at_j_lows.append(j_series.index[i])
+                    dates_at_j_lows.append(date_series.iloc[i])
                 elif (j_series.iloc[i] > j_series.iloc[i-1] and 
                       j_series.iloc[i] > j_series.iloc[i+1]):
                     j_highs.append(j_series.iloc[i])
                     price_at_j_highs.append(price_series.iloc[i])
-                    dates_at_j_highs.append(j_series.index[i])
+                    dates_at_j_highs.append(date_series.iloc[i])
             
-            messages.append(f"\n背离分析:")
-            messages.append(f"分析周期: 最近{len(recent_df)}个交易日")
+            messages.append(f"\n当前状态:")
             messages.append(f"当前价格: {current_price:.2f}, J值: {current_j:.2f}")
             
             # 检查底背离
@@ -183,21 +194,28 @@ def find_divergence(df, kdj, mid_term_days=30):
                 if j_lows:
                     recent_j_low = j_lows[-1]
                     recent_j_low_price = price_at_j_lows[-1]
+                    recent_j_low_date = dates_at_j_lows[-1]
                     if (abs(current_price - recent_j_low_price) / recent_j_low_price < 0.01 and  # 价格接近低点
                         current_j > recent_j_low * 1.1):  # J值明显高于低点
                         messages.append(f"\n可能形成底背离:")
-                        messages.append(f"当前价格接近低点，但J值明显高于前期低点")
+                        messages.append(f"当前: 价格{current_price:.2f}, J值{current_j:.2f}")
+                        messages.append(f"对比点({recent_j_low_date.strftime('%Y-%m-%d')}): 价格{recent_j_low_price:.2f}, J值{recent_j_low:.2f}")
                         messages.append("建议: 关注可能的反弹机会")
                 
                 # 检查潜在顶背离
                 if j_highs:
                     recent_j_high = j_highs[-1]
                     recent_j_high_price = price_at_j_highs[-1]
+                    recent_j_high_date = dates_at_j_highs[-1]
                     if (abs(current_price - recent_j_high_price) / recent_j_high_price < 0.01 and  # 价格接近高点
                         current_j < recent_j_high * 0.9):  # J值明显低于高点
                         messages.append(f"\n可能形成顶背离:")
-                        messages.append(f"当前价格接近高点，但J值明显低于前期高点")
+                        messages.append(f"当前: 价格{current_price:.2f}, J值{current_j:.2f}")
+                        messages.append(f"对比点({recent_j_high_date.strftime('%Y-%m-%d')}): 价格{recent_j_high_price:.2f}, J值{recent_j_high:.2f}")
                         messages.append("建议: 注意可能的回调风险")
+            
+            if not (bottom_divergence or top_divergence) and not (j_lows or j_highs):
+                messages.append("\n在分析区间内未发现明显的高点或低点，无法判断背离")
         
         except Exception as e:
             messages.append(f"\n分析数据时发生错误: {str(e)}")
@@ -220,6 +238,9 @@ def calculate_kdj(df, n=9, m1=3, m2=3):
     返回:
     DataFrame，包含K、D、J值
     """
+    # 确保数据按日期排序
+    df = df.sort_values('Date').reset_index(drop=True)
+    
     # 计算RSV
     low_list = df['Low'].rolling(window=n, min_periods=1).min()
     high_list = df['High'].rolling(window=n, min_periods=1).max()
@@ -240,15 +261,27 @@ def calculate_kdj(df, n=9, m1=3, m2=3):
     # 计算J值
     j = 3 * k - 2 * d
     
-    return pd.DataFrame({'K': k, 'D': d, 'J': j})
+    # 创建结果DataFrame，使用Date作为索引
+    result = pd.DataFrame({
+        'Date': df['Date'],
+        'K': k,
+        'D': d,
+        'J': j
+    })
+    
+    return result
 
-def check_kdj(symbol, end_date=None):
+def check_kdj(symbol, end_date=None, manager=None):
     """
-    获取并显示股票的KDJ指标值
+    检查股票的KDJ指标
     
     参数:
-    symbol (str): 股票代码或公司名称
-    end_date (str or datetime, optional): 结束日期，格式为'YYYY-MM-DD'，默认为当前日期
+    symbol (str): 股票代码
+    end_date (str or datetime): 分析日期，格式为YYYY-MM-DD
+    manager (StockDataManager): 数据管理器实例
+    
+    返回:
+    str: 分析结果
     """
     try:
         # 处理结束日期
@@ -257,145 +290,106 @@ def check_kdj(symbol, end_date=None):
         elif isinstance(end_date, str):
             end_date = datetime.strptime(end_date, '%Y-%m-%d')
             
+        # 检查目标日期是否超过当前日期
+        current_date = datetime.now()
+        if end_date > current_date:
+            debug_print(f"目标日期 {end_date.strftime('%Y-%m-%d')} 超过当前日期 {current_date.strftime('%Y-%m-%d')}，无法获取未来数据。")
+            return ""
+            
         # 为了确保获取到指定日期的数据，将结束日期延后一天
         query_end_date = end_date + timedelta(days=1)
-        # 获取足够的历史数据以计算指标
-        start_date = end_date - timedelta(days=60)  # 扩展数据获取范围以确保有足够的数据计算背离
         
-        info_print(f"正在获取 {symbol} 的数据...")
-        stock = yf.Ticker(symbol)
-        df = stock.history(start=start_date, end=query_end_date)
+        # 获取股票数据
+        if manager is None:
+            manager = StockDataManager()
+            
+        # 为了计算KDJ指标，我们需要获取足够的历史数据
+        # 计算200天前的日期
+        history_start_date = (end_date - timedelta(days=400)).strftime('%Y-%m-%d')
+        df, from_yf = manager.get_stock_data(symbol, start_date=history_start_date, end_date=query_end_date.strftime('%Y-%m-%d'))
         
-        if df.empty:
-            info_print(f"错误：未找到 {symbol} 的数据")
-            return None
+        if df is None or df.empty:
+            debug_print(f"无法获取 {symbol} 的数据。")
+            return ""
+            
+        # 确保数据格式正确
+        df['Date'] = pd.to_datetime(df['Date'])
+        
+        # 按日期排序
+        df = df.sort_values('Date').reset_index(drop=True)
             
         # 确保我们使用的是指定日期的数据
         target_date = end_date.strftime('%Y-%m-%d')
-        if target_date not in df.index:
-            info_print(f"错误：未找到 {target_date} 的数据")
-            info_print(f"可用的最近交易日期: {df.index[-1].strftime('%Y-%m-%d')}")
-            return None
+        df_target = df[df['Date'] == target_date]
+        
+        if df_target.empty:
+            debug_print(f"无法获取 {symbol} 在 {target_date} 的数据。")
+            return ""
+            
+        # 获取指定日期的数据索引
+        target_idx = df_target.index[0]
+        
+        # 确保有足够的历史数据来计算KDJ指标
+        if target_idx < 9:  # 需要至少9个交易日的数据
+            debug_print(f"历史数据不足，无法计算KDJ指标。当前数据点: {target_idx + 1}")
+            return ""
             
         # 计算KDJ指标
-        kdj = calculate_kdj(df, n=9, m1=3, m2=3)
+        kdj_df = calculate_kdj(df)
         
-        # 获取指定日期的数据索引
-        target_idx = df.index.get_loc(target_date)
+        # 获取目标日期的KDJ值
+        k = kdj_df['K'].iloc[target_idx]
+        d = kdj_df['D'].iloc[target_idx]
+        j = kdj_df['J'].iloc[target_idx]
         
-        # 获取最新值
-        latest_k = kdj['K'].iloc[target_idx]
-        latest_d = kdj['D'].iloc[target_idx]
-        latest_j = kdj['J'].iloc[target_idx]
+        # 构建输出结果
+        output = []
+        output.append(f"\n{symbol} KDJ指标分析:")
+        output.append(f"分析日期: {target_date}")
+        output.append(f"K值: {k:.2f}")
+        output.append(f"D值: {d:.2f}")
+        output.append(f"J值: {j:.2f}")
         
-        # 输出结果
-        info_print(f"\n{symbol} KDJ指标分析 (N=9, M1=3, M2=3):")
-        info_print(f"分析日期: {target_date}")
-        info_print(f"K值: {latest_k:.2f}")
-        info_print(f"D值: {latest_d:.2f}")
-        info_print(f"J值: {latest_j:.2f}")
-        
-        # 分析KDJ指标
-        info_print("\n技术分析:")
-        if latest_k > latest_d:
-            info_print("K线在D线上方，显示上升趋势")
-        else:
-            info_print("K线在D线下方，显示下降趋势")
+        # 判断KDJ状态
+        status = "正常"
+        if j > 90:
+            status = "严重超买"
+        elif j > 80:
+            status = "超买"
+        elif j < 10:
+            status = "严重超卖"
+        elif j < 20:
+            status = "超卖"
             
-        # 超买超卖分析
-        info_print("\n超买超卖分析:")
+        output.append(f"\nKDJ状态: {status}")
         
-        # K值分析
-        if latest_k > 95:
-            info_print("K值超过95，处于严重超买区间")
-            kdj_status = '严重超买'
-        elif latest_k > 85:
-            info_print("K值超过85，处于超买区间")
-            kdj_status = '超买'
-        elif latest_k < 5:
-            info_print("K值低于5，处于严重超卖区间")
-            kdj_status = '严重超卖'
-        elif latest_k < 15:
-            info_print("K值低于15，处于超卖区间")
-            kdj_status = '超卖'
-        else:
-            info_print("K值在正常区间")
-            kdj_status = '正常'
+        # 检查背离
+        _, _, divergence_msg = find_divergence(df, kdj_df)
+        if divergence_msg:
+            output.append(divergence_msg)
+        
+        result = "\n".join(output)
+        info_print(result)
+        return result
             
-        # D值分析
-        if latest_d > 90:
-            info_print("D值超过90，处于严重超买区间")
-        elif latest_d > 80:
-            info_print("D值超过80，处于超买区间")
-        elif latest_d < 10:
-            info_print("D值低于10，处于严重超卖区间")
-        elif latest_d < 20:
-            info_print("D值低于20，处于超卖区间")
-        else:
-            info_print("D值在正常区间")
-            
-        # J值分析
-        if latest_j > 110:
-            info_print("J值超过110，处于严重超买区间")
-        elif latest_j > 100:
-            info_print("J值超过100，处于超买区间")
-        elif latest_j < -10:
-            info_print("J值低于-10，处于严重超卖区间")
-        elif latest_j < 0:
-            info_print("J值低于0，处于超卖区间")
-        else:
-            info_print("J值在正常区间")
-            
-        # 综合分析
-        severe_overbought = sum([
-            1 if latest_k > 95 else 0,
-            1 if latest_d > 90 else 0,
-            1 if latest_j > 110 else 0
-        ])
-        
-        overbought = sum([
-            1 if 85 < latest_k <= 95 else 0,
-            1 if 80 < latest_d <= 90 else 0,
-            1 if 100 < latest_j <= 110 else 0
-        ])
-        
-        severe_oversold = sum([
-            1 if latest_k < 5 else 0,
-            1 if latest_d < 10 else 0,
-            1 if latest_j < -10 else 0
-        ])
-        
-        oversold = sum([
-            1 if 5 <= latest_k < 15 else 0,
-            1 if 10 <= latest_d < 20 else 0,
-            1 if -10 <= latest_j < 0 else 0
-        ])
-        
-        info_print("\n综合诊断:")
-        if severe_overbought >= 2:
-            info_print("警告：多个指标显示严重超买，极有可能出现显著回调")
-        elif overbought >= 2:
-            info_print("警告：多个指标显示超买，可能即将回调")
-        elif severe_oversold >= 2:
-            info_print("提示：多个指标显示严重超卖，极有可能出现显著反弹")
-        elif oversold >= 2:
-            info_print("提示：多个指标显示超卖，可能即将反弹")
-        else:
-            info_print("大多数指标在正常区间运行")
-            
-        # 背离分析
-        info_print("\n背离分析:")
-        _, _, divergence_message = find_divergence(df.loc[:target_date], kdj.loc[:target_date])
-        if divergence_message and divergence_message.strip():
-            info_print(divergence_message)
-        else:
-            info_print("未发现明显的背离现象")
-        
-        return kdj.iloc[target_idx]
-        
     except Exception as e:
-        debug_print(f"发生错误: {str(e)}")
-        return None
+        error_msg = f"分析过程中出现错误: {str(e)}"
+        debug_print(error_msg)
+        return ""
+
+def analyze_stock(symbol, target_date=None, manager=None):
+    """
+    分析股票的KDJ指标
+    
+    参数:
+    symbol (str): 股票代码
+    target_date (str): 分析日期，格式为YYYY-MM-DD
+    manager (StockDataManager): 数据管理器实例
+    
+    返回:
+    str: 分析结果
+    """
+    return check_kdj(symbol, target_date, manager=manager)
 
 def main():
     """主函数"""
@@ -408,10 +402,13 @@ def main():
         # 验证并标准化参数
         normalized_codes, analysis_date = validate_and_normalize_params(args.args)
         
+        # 创建数据管理器实例
+        manager = StockDataManager()
+        
         # 分析每个股票
         for stock_code in normalized_codes:
             try:
-                check_kdj(stock_code, analysis_date)
+                check_kdj(stock_code, analysis_date, manager=manager)
                 if stock_code != normalized_codes[-1]:  # 如果不是最后一个股票，添加分隔线
                     print("\n" + "="*60 + "\n")
             except Exception as e:

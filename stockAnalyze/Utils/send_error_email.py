@@ -7,10 +7,17 @@ from email.mime.multipart import MIMEMultipart
 from email.header import Header
 import traceback
 from datetime import datetime
+from pathlib import Path
+import platform
+import psutil
 
 def read_email_list(filename):
     """读取邮件列表"""
-    with open(filename, 'r') as f:
+    # 获取脚本所在目录的绝对路径
+    script_dir = Path(__file__).parent.parent
+    email_list_path = script_dir / 'Settings' / filename
+    
+    with open(email_list_path, 'r') as f:
         lines = [line.strip() for line in f if line.strip()]
         return lines
 
@@ -171,9 +178,7 @@ def main():
     """主函数"""
     try:
         # 读取邮件列表
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        email_list_path = os.path.join(script_dir, 'pipeline_alert_email_list.txt')
-        to_list = read_email_list(email_list_path)
+        to_list = read_email_list('pipeline_alert_email_list.txt')
         
         if not to_list:
             print("错误：邮件列表为空")
